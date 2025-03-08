@@ -7,7 +7,7 @@
 void PrintPEInfo(const char* filename) {
     std::ifstream file(filename, std::ios::binary);
     if (!file) {
-        std::cerr << "Không thể mở tệp!" << std::endl;
+        std::cerr << "Cannot open file!" << std::endl;
         return;
     }
 
@@ -15,7 +15,7 @@ void PrintPEInfo(const char* filename) {
     file.read(reinterpret_cast<char*>(&dosHeader), sizeof(IMAGE_DOS_HEADER));
 
     if (dosHeader.e_magic != IMAGE_DOS_SIGNATURE) {
-        std::cerr << "Tệp không phải PE hợp lệ!" << std::endl;
+        std::cerr << "Not a valid PE file!" << std::endl;
         return;
     }
 
@@ -24,7 +24,7 @@ void PrintPEInfo(const char* filename) {
     file.read(reinterpret_cast<char*>(&ntHeaders), sizeof(IMAGE_NT_HEADERS32));
 
     if (ntHeaders.Signature != IMAGE_NT_SIGNATURE) {
-        std::cerr << "Không tìm thấy PE header!" << std::endl;
+        std::cerr << "Cannot find PE header!" << std::endl;
         return;
     }
 
@@ -63,7 +63,7 @@ void PrintPEInfo(const char* filename) {
 
 int main(int argc, char* argv[]) {
     if (argc != 2) {
-        std::cerr << "Sử dụng: " << argv[0] << " <PE file>" << std::endl;
+        std::cerr << "Usage: " << argv[0] << " <PE file>" << std::endl;
         return 1;
     }
 
