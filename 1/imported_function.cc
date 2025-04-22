@@ -8,13 +8,13 @@
 // Convert Relative Virtual Address (RVA) to File Offset
 DWORD RvaToFileOffset(DWORD rva, const std::vector<IMAGE_SECTION_HEADER>& sections) {
     for (const auto& section : sections) {
-        // Check if the RVA is within this section
-        if (rva >= section.VirtualAddress && 
-            rva < section.VirtualAddress + section.Misc.VirtualSize) {
+        if (rva >= section.VirtualAddress &&
+            rva < section.VirtualAddress + section.Misc.VirtualSize)
+        {
             return (rva - section.VirtualAddress) + section.PointerToRawData;
         }
     }
-    return 0; // Not found
+    return 0;
 }
 
 void ListImportedFunctions(const char* filename) {
@@ -24,161 +24,157 @@ void ListImportedFunctions(const char* filename) {
         return;
     }
 
-    // Read DOS header
+    // --- Read DOS header ---
     IMAGE_DOS_HEADER dosHeader;
-    file.read(reinterpret_cast<char*>(&dosHeader), sizeof(IMAGE_DOS_HEADER));
-
+    file.read(reinterpret_cast<char*>(&dosHeader), sizeof(dosHeader));
     if (dosHeader.e_magic != IMAGE_DOS_SIGNATURE) {
         std::cerr << "Invalid PE file format!" << std::endl;
         return;
     }
 
-    // Move to PE header
+    // --- Locate NT headers ---
     file.seekg(dosHeader.e_lfanew, std::ios::beg);
-    
-    // Read NT signature
     DWORD ntSignature;
-    file.read(reinterpret_cast<char*>(&ntSignature), sizeof(DWORD));
-    
+    file.read(reinterpret_cast<char*>(&ntSignature), sizeof(ntSignature));
     if (ntSignature != IMAGE_NT_SIGNATURE) {
         std::cerr << "PE header not found!" << std::endl;
         return;
     }
-    
-    // Read File Header to determine if it's 32-bit or 64-bit
+
+    // --- File header ---
     IMAGE_FILE_HEADER fileHeader;
-    file.read(reinterpret_cast<char*>(&fileHeader), sizeof(IMAGE_FILE_HEADER));
-    
-    // Variables to store import directory information
+    file.read(reinterpret_cast<char*>(&fileHeader), sizeof(fileHeader));
+
+    // --- Optional header & data directory ---
+    bool is64Bit = (fileHeader.Machine == IMAGE_FILE_MACHINE_AMD64);
     DWORD importDirectoryRVA = 0;
     DWORD importDirectorySize = 0;
-    
-    // Read appropriate optional header based on architecture
-    bool is64Bit = (fileHeader.Machine == IMAGE_FILE_MACHINE_AMD64);
-    
-    std::vector<IMAGE_SECTION_HEADER> sections(fileHeader.NumberOfSections);
-    
+
     if (is64Bit) {
-        IMAGE_OPTIONAL_HEADER64 optionalHeader;
-        file.read(reinterpret_cast<char*>(&optionalHeader), sizeof(IMAGE_OPTIONAL_HEADER64));
-        
-        importDirectoryRVA = optionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress;
-        importDirectorySize = optionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].Size;
+        IMAGE_OPTIONAL_HEADER64 opt64;
+        file.read(reinterpret_cast<char*>(&opt64), sizeof(opt64));
+        importDirectoryRVA  = opt64.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress;
+        importDirectorySize = opt64.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].Size;
     } else {
-        IMAGE_OPTIONAL_HEADER32 optionalHeader;
-        file.read(reinterpret_cast<char*>(&optionalHeader), sizeof(IMAGE_OPTIONAL_HEADER32));
-        
-        importDirectoryRVA = optionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress;
-        importDirectorySize = optionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].Size;
+        IMAGE_OPTIONAL_HEADER32 opt32;
+        file.read(reinterpret_cast<char*>(&opt32), sizeof(opt32));
+        importDirectoryRVA  = opt32.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress;
+        importDirectorySize = opt32.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].Size;
     }
-    
+
     if (importDirectoryRVA == 0) {
-        std::cout << "No Import Table found." << std::endl;
+        std::cout << "No Import Table found.\n";
         return;
     }
-    
-    // Read section headers
+
+    // --- Section headers ---
+    std::vector<IMAGE_SECTION_HEADER> sections(fileHeader.NumberOfSections);
     for (int i = 0; i < fileHeader.NumberOfSections; i++) {
         file.read(reinterpret_cast<char*>(&sections[i]), sizeof(IMAGE_SECTION_HEADER));
     }
-    
-    // Convert RVA to file offset for import directory
-    DWORD importDirFileOffset = RvaToFileOffset(importDirectoryRVA, sections);
-    if (importDirFileOffset == 0) {
-        std::cerr << "Failed to locate import directory in file!" << std::endl;
+
+    // --- Compute file offset of import directory ---
+    DWORD importDirOffset = RvaToFileOffset(importDirectoryRVA, sections);
+    if (importDirOffset == 0) {
+        std::cerr << "Failed to locate import directory in file!\n";
         return;
     }
-    
-    // Read import descriptors
-    file.seekg(importDirFileOffset, std::ios::beg);
+
+    std::cout << "---- IMPORTED FUNCTIONS ----\n"
+              << "File: " << filename
+              << (is64Bit ? " (64-bit)" : " (32-bit)") << "\n"
+              << "-----------------------------\n";
+
+    // --- Walk each IMAGE_IMPORT_DESCRIPTOR by explicit offset ---
+    DWORD descOffset = importDirOffset;
     IMAGE_IMPORT_DESCRIPTOR importDesc;
-
-    std::cout << "---- IMPORTED FUNCTIONS ----\n";
-    std::cout << "File: " << filename << (is64Bit ? " (64-bit)" : " (32-bit)") << std::endl;
-    std::cout << "-----------------------------\n";
-
     int dllCount = 0;
     int totalFunctions = 0;
 
     while (true) {
-        file.read(reinterpret_cast<char*>(&importDesc), sizeof(IMAGE_IMPORT_DESCRIPTOR));
-        if (importDesc.Name == 0) break; // End of Import Table
+        // 1) Read next descriptor
+        file.seekg(descOffset, std::ios::beg);
+        file.read(reinterpret_cast<char*>(&importDesc), sizeof(importDesc));
+        if (!file || importDesc.Name == 0) break;  // end of table
 
-        DWORD dllNameOffset = RvaToFileOffset(importDesc.Name, sections);
-        if (dllNameOffset == 0) continue;
+        // 2) Read DLL name
+        DWORD nameOffset = RvaToFileOffset(importDesc.Name, sections);
+        if (nameOffset == 0) break;
+        file.seekg(nameOffset, std::ios::beg);
+        std::string dllName;
+        std::getline(file, dllName, '\0');
 
-        file.seekg(dllNameOffset, std::ios::beg);
-        char dllName[256] = {0};
-        file.getline(dllName, sizeof(dllName), '\0');
-        
-        dllCount++;
-        std::cout << "DLL #" << dllCount << ": " << dllName << std::endl;
+        ++dllCount;
+        std::cout << "DLL #" << dllCount << ": " << dllName << "\n";
 
-        // Use OriginalFirstThunk if available, otherwise use FirstThunk
-        DWORD thunkRVA = importDesc.OriginalFirstThunk ? importDesc.OriginalFirstThunk : importDesc.FirstThunk;
+        // 3) Pick the right thunk list
+        DWORD thunkRVA  = importDesc.OriginalFirstThunk
+                        ? importDesc.OriginalFirstThunk
+                        : importDesc.FirstThunk;
         DWORD thunkOffset = RvaToFileOffset(thunkRVA, sections);
-        if (thunkOffset == 0) continue;
+        if (thunkOffset == 0) {
+            std::cout << "  <cannot locate thunk table>\n";
+        } else {
+            int      funcCount = 0;
+            size_t   entrySize = is64Bit ? sizeof(ULONGLONG) : sizeof(DWORD);
 
-        file.seekg(thunkOffset, std::ios::beg);
-        
-        int functionCount = 0;
+            while (true) {
+                // Read the thunk entry
+                ULONGLONG raw = 0;
+                file.seekg(thunkOffset + funcCount * entrySize, std::ios::beg);
+                if (is64Bit) {
+                    file.read(reinterpret_cast<char*>(&raw), sizeof(raw));
+                } else {
+                    DWORD raw32;
+                    file.read(reinterpret_cast<char*>(&raw32), sizeof(raw32));
+                    raw = raw32;
+                }
+                if (!file || raw == 0) break;  // end of import list
 
-        while (true) {
-            // Read thunk data based on architecture
-            ULONGLONG thunkData = 0;
-            if (is64Bit) {
-                file.read(reinterpret_cast<char*>(&thunkData), sizeof(ULONGLONG));
-                if (thunkData == 0) break; // End of function list
-            } else {
-                DWORD thunk32;
-                file.read(reinterpret_cast<char*>(&thunk32), sizeof(DWORD));
-                if (thunk32 == 0) break; // End of function list
-                thunkData = thunk32;
+                ++funcCount;
+                ++totalFunctions;
+
+                // Imported by ordinal?
+                bool byOrdinal = is64Bit
+                    ? (raw & IMAGE_ORDINAL_FLAG64) != 0
+                    : (raw & IMAGE_ORDINAL_FLAG32) != 0;
+
+                if (byOrdinal) {
+                    WORD ord = static_cast<WORD>(raw & 0xFFFF);
+                    std::cout << "  " << std::setw(4) << funcCount
+                              << ". Ordinal: " << ord << "\n";
+                } else {
+                    // Imported by name: raw is RVA of IMAGE_IMPORT_BY_NAME
+                    DWORD hintNameRVA = static_cast<DWORD>(raw);
+                    DWORD hintNameOffset = RvaToFileOffset(hintNameRVA, sections);
+                    if (hintNameOffset) {
+                        // skip the 2-byte Hint
+                        file.seekg(hintNameOffset + 2, std::ios::beg);
+                        std::string funcName;
+                        std::getline(file, funcName, '\0');
+                        std::cout << "  " << std::setw(4) << funcCount
+                                  << ". " << funcName << "\n";
+                    }
+                }
             }
-
-            functionCount++;
-            totalFunctions++;
-
-            // Check if import by ordinal
-            if ((is64Bit && (thunkData & IMAGE_ORDINAL_FLAG64)) || 
-                (!is64Bit && (thunkData & IMAGE_ORDINAL_FLAG32))) {
-                
-                WORD ordinal = is64Bit ? (thunkData & 0xFFFF) : (thunkData & 0xFFFF);
-                std::cout << "  " << std::setw(4) << functionCount << ". " 
-                          << "Ordinal: " << ordinal << std::endl;
-            } else {
-                // Import by name
-                DWORD nameRVA = static_cast<DWORD>(thunkData);
-                DWORD nameOffset = RvaToFileOffset(nameRVA, sections);
-                if (nameOffset == 0) continue;
-
-                // Skip the Hint (2 bytes)
-                file.seekg(nameOffset + 2, std::ios::beg);
-                
-                char functionName[256] = {0};
-                file.getline(functionName, sizeof(functionName), '\0');
-                
-                std::cout << "  " << std::setw(4) << functionCount << ". " 
-                          << functionName << std::endl;
-            }
-
-            // Return to the next thunk entry
-            file.seekg(thunkOffset + (functionCount * (is64Bit ? sizeof(ULONGLONG) : sizeof(DWORD))), std::ios::beg);
         }
+
         std::cout << "-----------------------------\n";
+
+        // 4) Advance to the next descriptor
+        descOffset += sizeof(IMAGE_IMPORT_DESCRIPTOR);
     }
 
-    std::cout << "Summary: " << dllCount << " DLLs, " << totalFunctions << " imported functions\n";
-    std::cout << "-----------------------------\n";
-    file.close();
+    std::cout << "Summary: " << dllCount
+              << " DLLs, " << totalFunctions
+              << " imported functions\n-----------------------------\n";
 }
 
 int main(int argc, char* argv[]) {
     if (argc != 2) {
-        std::cerr << "Usage: " << argv[0] << " <PE file>" << std::endl;
+        std::cerr << "Usage: " << argv[0] << " <PE file>\n";
         return 1;
     }
-
     ListImportedFunctions(argv[1]);
     return 0;
 }
