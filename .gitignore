@@ -3,3 +3,6 @@ ngu.c
 ngu.exe
 test.c
 test.exe
+/1/*.exe
+/2/*.exe
+# /3/*.exe 
