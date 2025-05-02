@@ -3,21 +3,21 @@
 #include <stdlib.h>
 #include <string.h>
 
-// Shellcode template: pushad; push uType; push lpCaption; push lpText; push hWnd; call MessageBoxA; popad; jmp to old OEP
+// Shellcode 
 static unsigned char shellcode_template[] = {
     0x60,                   // pushad
     // push uType = MB_OK | MB_ICONWARNING (0x31)
     0x6A, 0x31,
-    // push offset caption (patched at runtime)
+    // push offset caption 
     0x68, 0,0,0,0,
-    // push offset text (patched at runtime)
+    // push offset text 
     0x68, 0,0,0,0,
     // push hWnd = NULL
     0x6A, 0x00,
-    // call MessageBoxA (patched at runtime)
+    // call MessageBoxA 
     0xE8, 0,0,0,0,
     0x61,                   // popad
-    // jmp back to original entry point (patched at runtime)
+    // jmp back to original entry point 
     0xE9, 0,0,0,0
 };
 
